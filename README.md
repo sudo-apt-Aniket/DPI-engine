@@ -1,202 +1,365 @@
-# DPI Engine - Deep Packet Inspection Tool
+# DPI Engine
 
-A high-performance **Deep Packet Inspection (DPI) Engine** written in Python for network traffic analysis and filtering. This project demonstrates advanced networking concepts, multi-threaded architecture, and real-world network security applications.
-
----
-
-## 🚀 Project Overview
-
-This DPI Engine is a network analysis tool that:
-- **Reads PCAP files** (packet captures from Wireshark/tcpdump)
-- **Parses network packets** at multiple layers (Ethernet, IP, TCP, UDP)
-- **Extracts SNI** (Server Name Indication) from TLS/HTTPS connections
-- **Classifies applications** by analyzing network traffic patterns
-- **Blocks traffic** based on configurable rules (IP, app, domain)
-- **Supports multi-threading** for high-throughput processing
+A multithreaded Deep Packet Inspection engine written in pure Python — zero third-party dependencies. It reads PCAP files, parses Ethernet/IPv4/TCP/UDP frames by hand, extracts TLS SNI and HTTP Host headers, classifies traffic by application, and filters packets based on configurable rules before writing a clean output PCAP.
 
 ---
 
-## 🎯 Key Features
+## What it does
 
-| Feature | Description |
-|---------|-------------|
-| **Packet Parsing** | Complete parsing of Ethernet, IPv4, TCP, UDP headers |
-| **SNI Extraction** | Extract domain names from TLS Client Hello packets |
-| **App Classification** | Identify 20+ applications (YouTube, Facebook, Netflix, etc.) |
-| **Traffic Blocking** | Block by IP, application type, or domain name |
-| **Multi-threaded** | Parallel processing with load balancing |
-| **Flow Tracking** | Maintain connection state for Stateful inspection |
-| **Report Generation** | Detailed statistics and classification reports |
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│    PCAP     │     │   Parser    │     │   DPI       │
-│   Reader    │ ──► │   Layer     │ ──► │   Engine    │
-└─────────────┘     └─────────────┘     └──────┬──────┘
-                                              │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    │                          │                          │
-                    ▼                          ▼                          ▼
-           ┌────────────────┬┌────────────────┬┌────────────────┐
-           │  Application   ││  Rule         ││  Connection   │
-           │  Classifier    ││  Manager      ││  Tracker      │
-           │  (SNI→App)     ││  (Blocking)   ││  (Flow State) │
-           └────────────────┴┴────────────────┴┴────────────────┘
-                                              │
-                                              ▼
-                                   ┌─────────────────────┐
-                                   │   Output PCAP       │
-                                   │   (Filtered Traffic)│
-                                   └─────────────────────┘
-```
+- Parses raw PCAP files at the byte level — no libpcap, no Scapy
+- Extracts TLS Server Name Indication (SNI) from Client Hello packets
+- Extracts HTTP Host headers and DNS query names
+- Classifies traffic into 20+ applications (YouTube, Netflix, Discord, Spotify, etc.)
+- Blocks traffic by IP address, app name, domain, or port
+- Tracks per-flow connection state using 5-tuple identifiers
+- Runs a real multi-threaded pipeline: Reader → Load Balancers → Fast Path processors → Output writer
+- Generates a per-app classification report after each run
 
 ---
 
-## 📁 File Structure
-
-```
-python_language/
-├── main.py                 # CLI entry point
-├── pcap_reader.py          # PCAP file reader
-├── packet_parser.py        # Network protocol parser
-├── dpi_engine.py           # Main engine orchestrator
-├── dpi_types.py            # Data types & structures
-├── sni_extractor.py        # SNI extraction from TLS
-├── rule_manager.py         # Blocking rules manager
-├── connection_tracker.py   # Connection flow tracking
-├── thread_safe_queue.py    # Thread-safe queue
-├── load_balancer.py        # Load balancer
-└── output/                 # Output files directory
-```
+## Architecture
+PCAP Reader
+│
+▼  (5-tuple hash → select LB)
+Load Balancer threads  (2 LB threads)
+│
+▼  (5-tuple hash → select FP within pool)
+Fast Path threads  (4 FP threads, 2 per LB)
+│  ┌─────────────────┐
+│  │  Rule Manager   │  ← block by IP / app / domain / port
+│  │  SNI Extractor  │  ← TLS, HTTP, DNS
+│  │  App Classifier │  ← SNI → AppType
+│  │  Conn Tracker   │  ← flow state per 5-tuple
+│  └─────────────────┘
+▼
+Output Queue → Output Writer → filtered.pcap
+Connection affinity is guaranteed: all packets belonging to the same flow always go to the same Fast Path thread via consistent hashing, so connection state is never accessed across threads without locking.
 
 ---
 
-## 🛠️ How to Run
+## Project structure
+DPI-engine/
+├── src/
+│   ├── main.py                # CLI entry point (analyze / dpi / generate)
+│   ├── pcap_reader.py         # PCAP global header + per-packet read/write
+│   ├── packet_parser.py       # Ethernet → IPv4 → TCP/UDP parser, builds 5-tuple
+│   ├── sni_extractor.py       # TLS Client Hello SNI, HTTP Host, DNS query extraction
+│   ├── dpi_types.py           # AppType enum, SNI→app mapping, shared data classes
+│   ├── dpi_engine.py          # DPIEngine (threaded) + SimpleDPIEngine (reference)
+│   ├── connection_tracker.py  # Per-flow state machine (NEW→ESTABLISHED→CLASSIFIED→CLOSED)
+│   ├── rule_manager.py        # Thread-safe block lists: IP, app, domain, port
+│   ├── load_balancer.py       # LB thread: receives packets, hashes to FP pool
+│   ├── fast_path.py           # FP thread: inspects, classifies, applies rules
+│   ├── thread_safe_queue.py   # Bounded queue with try_push / blocking pop
+│   └── generate_test_pcap.py  # Generates synthetic test traffic (TLS + HTTP + DNS)
+├── test_dpi.pcap              # Sample capture — ready to use immediately
+├── pyproject.toml             # pip-installable package config
+├── .gitignore
+└── LICENSE
 
-### Prerequisites
+---
+
+## Requirements
+
 - Python 3.7+
-- No external dependencies (pure Python!)
-
-### Basic Usage
-
-```bash
-# Analyze a PCAP file
-python main.py analyze capture.pcap
-
-# Run DPI analysis with output
-python main.py dpi input.pcap -o output.pcap
-
-# Block specific applications
-python main.py dpi input.pcap -o output.pcap --block youtube --block facebook
-
-# Block by IP address
-python main.py dpi input.pcap -o output.pcap --block-ip 192.168.1.50
-
-# Limit packets displayed
-python main.py analyze capture.pcap 10
-```
-
-### Generate Test Data
-```bash
-python generate_test_pcap.py
-```
+- No third-party packages — pure standard library
 
 ---
 
-## 💻 Technical Highlights
+## Install
 
-### 1. Network Protocol Parsing
-- Manual parsing of raw bytes into structured data
-- Understanding of network layers (OSI model)
-- Handling network byte order (big-endian)
+```bash
+git clone https://github.com/sudo-apt-Aniket/DPI-engine.git
+cd DPI-engine
 
-### 2. Deep Packet Inspection
-- TLS Client Hello parsing to extract SNI
-- HTTP Host header extraction
-- DNS query domain extraction
+python -m venv venv
 
-### 3. Application Identification
-- Pattern matching on SNI strings
-- Domain-to-application mapping
-- Support for 20+ popular applications
+# Windows
+venv\Scripts\activate
+# macOS / Linux
+source venv/bin/activate
 
-### 4. Multi-threaded Architecture
-- Reader → Load Balancer → Fast Path pipeline
-- Thread-safe queues for inter-thread communication
-- Consistent hashing for connection affinity
+pip install -e .
+```
 
-### 5. Flow-based Tracking
-- Five-tuple identification (srcIP, dstIP, srcPort, dstPort, protocol)
-- Connection state machine (NEW → ESTABLISHED → CLASSIFIED → CLOSED)
-- Timeout-based cleanup
+This registers a `dpi-engine` command so you can run it from anywhere — no need to `cd src/` first.
 
 ---
 
-## 📊 Sample Output
+## Usage
 
+### Generate test traffic
+
+```bash
+cd src
+python3 generate_test_pcap.py
+# Creates test_dpi.pcap: 16 TLS flows, 2 HTTP flows, 4 DNS queries
 ```
+
+### Inspect packets
+
+```bash
+dpi-engine analyze test_dpi.pcap 10
+```
+Shows full Ethernet/IP/TCP/UDP header breakdown for the first 10 packets.
+
+### Run DPI classification
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap
+```
+
+### Block by app
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -b youtube -b tiktok
+```
+
+App names: `facebook`, `twitter`, `instagram`, `youtube`, `netflix`, `tiktok`, `whatsapp`, `telegram`, `discord`, `zoom`, `spotify`, `github`, `amazon`, `microsoft`, `apple`, `google`
+
+### Block by domain
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -b somedomain.com
+```
+
+Anything that isn't a known app name is treated as a domain.
+
+### Block by IP
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap --block-ip 192.168.1.50
+```
+
+### Load rules from a file
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -r rules.txt
+```
+
+Rules file format (one rule per line, `#` for comments):
+Block by app (use AppType enum name, uppercase)
+app:YOUTUBE
+app:TIKTOK
+Block by domain
+domain:facebook.com
+Block by IP
+ip:192.168.1.50
+Block by port
+port:8080
+
+### Full flag reference
+dpi-engine dpi --help
+
+---
+
+## Sample output
 ====================================
 DPI Engine v1.0 (Python)
-====================================
-
 Processing: test_dpi.pcap
-Output to:   output.pcap
+Output to:   out.pcap
+Opened PCAP file: test_dpi.pcap
+Version: 2.4
+Snaplen: 65535 bytes
+Link type: Ethernet
+============================================================
+DPI Engine Statistics Report
+Total Packets:      77
+Total Bytes:        5738
+Forwarded Packets:  75
+Dropped Packets:    2
+TCP Packets:        73
+UDP Packets:        4
+Other Packets:      0
+Active Connections: 0
+Fast Path Statistics:
+Total Processed:  77
+Total Forwarded:  75
+Total Dropped:    2
+============================================================
+Classification Report
+Google:     2
+YouTube:    2   ← blocked (2 packets dropped)
+Facebook:   2
+Twitter:    2
+Instagram:  1
+TikTok:     1
+Microsoft:  1
+Apple:      1
+Amazon:     1
+Netflix:    1
+Discord:    1
+Zoom:       1
+Telegram:   1
+Spotify:    1
 
-====================================
-Summary:
-  Total packets read:  77
-  Parse errors:        0
-====================================
+---
 
-====================================Classification Report
-====================================
-  HTTPS: 39
-  Unknown: 16
-  YouTube: 4
-  DNS: 4
-  Facebook: 3
-  GitHub: 2
-  Google: 2
-  Netflix: 1
-  ...
+## Known limitations
+
+- **QUIC / HTTP3**: the extractor runs the TLS parser on raw QUIC bytes, which won't work reliably — QUIC payloads are encrypted and framed differently from plaintext TLS records. Proper QUIC support would require QUIC header parsing before the TLS layer.
+- **DNS compression pointers**: the parser stops cleanly at a pointer byte rather than following it, so compressed DNS names are partially read. Simple uncompressed queries (the most common case) parse correctly.
+- **IPv6**: not implemented. Only IPv4 packets are inspected; IPv6 frames are passed through unclassified.
+- **Python GIL**: the threading architecture mirrors the C-style pipeline exactly, but CPython's GIL means threads don't achieve true CPU parallelism. The design is correct and demonstrates the architecture clearly; for throughput-critical use you'd want PyPy or a compiled extension for the hot path.
+
+---
+
+## License
+
+MIT
+To update it:
+powershell# paste the above content into README.md, then:
+git add README.md
+git commit -m "Rewrite README — accurate, no legacy content"
+git push origin main
+Ready to write the Medium post whenever you are.
+---
+
+## Requirements
+
+- Python 3.7+
+- No third-party packages — pure standard library
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/sudo-apt-Aniket/DPI-engine.git
+cd DPI-engine
+
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+# macOS / Linux
+source venv/bin/activate
+
+pip install -e .
 ```
 
----
-
-## 🎓 What I Learned
-
-This project demonstrates expertise in:
-
-| Area | Skills Demonstrated |
-|------|---------------------|
-| **Networking** | TCP/IP, TLS/HTTPS, DNS protocols |
-| **Python** | OOP, threading, data structures, file I/O |
-| **System Programming** | Multi-threading, thread-safe data structures |
-| **Security** | DPI concepts, traffic filtering |
-| **Software Engineering** | Code organization, documentation, CLI design |
+This registers a `dpi-engine` command so you can run it from anywhere — no need to `cd src/` first.
 
 ---
 
-## 🔧 Potential Improvements
+## Usage
 
-- [ ] Add HTTP/HTTPS header analysis
-- [ ] Implement QUIC/HTTP3 support
-- [ ] Add bandwidth throttling
-- [ ] Real-time dashboard
-- [ ] PCAPNG format support
-- [ ] IPv6 support
+### Generate test traffic
+
+```bash
+cd src
+python3 generate_test_pcap.py
+# Creates test_dpi.pcap: 16 TLS flows, 2 HTTP flows, 4 DNS queries
+```
+
+### Inspect packets
+
+```bash
+dpi-engine analyze test_dpi.pcap 10
+```
+Shows full Ethernet/IP/TCP/UDP header breakdown for the first 10 packets.
+
+### Run DPI classification
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap
+```
+
+### Block by app
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -b youtube -b tiktok
+```
+
+App names: `facebook`, `twitter`, `instagram`, `youtube`, `netflix`, `tiktok`, `whatsapp`, `telegram`, `discord`, `zoom`, `spotify`, `github`, `amazon`, `microsoft`, `apple`, `google`
+
+### Block by domain
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -b somedomain.com
+```
+
+Anything that isn't a known app name is treated as a domain.
+
+### Block by IP
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap --block-ip 192.168.1.50
+```
+
+### Load rules from a file
+
+```bash
+dpi-engine dpi test_dpi.pcap -o out.pcap -r rules.txt
+```
+
+Rules file format (one rule per line, `#` for comments):
+Block by app (use AppType enum name, uppercase)
+app:YOUTUBE
+app:TIKTOK
+Block by domain
+domain:facebook.com
+Block by IP
+ip:192.168.1.50
+Block by port
+port:8080
+
+### Full flag reference
+dpi-engine dpi --help
 
 ---
 
-## 📝 License
-
-This project is for educational purposes.
+## Sample output
+====================================
+DPI Engine v1.0 (Python)
+Processing: test_dpi.pcap
+Output to:   out.pcap
+Opened PCAP file: test_dpi.pcap
+Version: 2.4
+Snaplen: 65535 bytes
+Link type: Ethernet
+============================================================
+DPI Engine Statistics Report
+Total Packets:      77
+Total Bytes:        5738
+Forwarded Packets:  75
+Dropped Packets:    2
+TCP Packets:        73
+UDP Packets:        4
+Other Packets:      0
+Active Connections: 0
+Fast Path Statistics:
+Total Processed:  77
+Total Forwarded:  75
+Total Dropped:    2
+============================================================
+Classification Report
+Google:     2
+YouTube:    2   ← blocked (2 packets dropped)
+Facebook:   2
+Twitter:    2
+Instagram:  1
+TikTok:     1
+Microsoft:  1
+Apple:      1
+Amazon:     1
+Netflix:    1
+Discord:    1
+Zoom:       1
+Telegram:   1
+Spotify:    1
 
 ---
 
+## Known limitations
 
+- **QUIC / HTTP3**: the extractor runs the TLS parser on raw QUIC bytes, which won't work reliably — QUIC payloads are encrypted and framed differently from plaintext TLS records. Proper QUIC support would require QUIC header parsing before the TLS layer.
+- **DNS compression pointers**: the parser stops cleanly at a pointer byte rather than following it, so compressed DNS names are partially read. Simple uncompressed queries (the most common case) parse correctly.
+- **IPv6**: not implemented. Only IPv4 packets are inspected; IPv6 frames are passed through unclassified.
+- **Python GIL**: the threading architecture mirrors the C-style pipeline exactly, but CPython's GIL means threads don't achieve true CPU parallelism. The design is correct and demonstrates the architecture clearly; for throughput-critical use you'd want PyPy or a compiled extension for the hot path.
 
+---
+
+## License
+
+MIT
