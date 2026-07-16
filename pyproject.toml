@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dpi-engine"
+version = "1.0.0"
+description = "Deep Packet Inspection engine (Python port)"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "main", "pcap_reader", "packet_parser", "dpi_types", "dpi_engine",
+    "connection_tracker", "fast_path", "load_balancer", "rule_manager",
+    "sni_extractor", "thread_safe_queue",
+]
+
+[project.scripts]
+dpi-engine = "main:main"
